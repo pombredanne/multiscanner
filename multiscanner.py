@@ -62,6 +62,20 @@ from common import convert_encoding
 from common import queue2list
 from common import load_module
 
+
+class _Print():
+    def __init__(self, lock=threading.Lock(), real_print=print):
+        self.lock = lock
+        self.real_print = real_print
+
+    def __call__(self, *args, **kwargs):
+        self.lock.acquire()
+        try:
+            self.real_print(*args, **kwargs)
+        finally:
+            self.lock.release()
+print = _Print()
+
 class _Thread(threading.Thread):
     """The threading.Thread class with some more cowbell"""
     def __init__(self, group=None, target=None, name=None, args=(), kwargs=None):
@@ -160,6 +174,7 @@ def _runModule(modname, mod, filelist, threadDict, global_module_interface, conf
     """
 
     mod.multiscanner = _ModuleInterface(modname, global_module_interface)
+    mod.print = print
 
     if not conf:
         try:
@@ -302,6 +317,7 @@ def _copy_to_share(filelist, filedic, sharedir):
     for fname in tmpfilelist:
         uid = ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(4))
         newfile = uid + os.path.basename(fname)
+        newfile = newfile.replace(' ', '_')
         filedic[newfile] = fname
         newfile = os.path.join(sharedir, newfile)
         shutil.copyfile(fname, newfile)
@@ -373,6 +389,7 @@ def _write_missing_module_configs(ModuleList, Config, filepath=CONFIG):
     Config - The config object
     """
     ConfNeedsWrite = False
+    ModuleList.sort()
     for module in ModuleList:
         if module.endswith(".py"):
             modname = os.path.basename(module.split('.')[0])
@@ -412,6 +429,7 @@ def _rewite_config(ModuleList, Config, filepath=CONFIG):
     """
     if VERBOSE:
         print("Rewriting config...")
+    ModuleList.sort()
     for module in ModuleList:
         if module.endswith(".py"):
             modname = os.path.basename(module.split('.')[0])
@@ -435,7 +453,7 @@ def _rewite_config(ModuleList, Config, filepath=CONFIG):
     conffile.close()
 
 
-def config_init(filepath):
+def config_init(filepath, module_list=parseDir(MODULEDIR, recursive=True)):
     """
     Creates a new config file at filepath
 
@@ -443,8 +461,7 @@ def config_init(filepath):
     """
     Config = configparser.SafeConfigParser()
     Config.optionxform = str
-    ModuleList = parseDir(MODULEDIR)
-    _rewite_config(ModuleList, Config, filepath)
+    _rewite_config(module_list, Config, filepath)
 
 
 def parse_reports(resultlist, groups=[], ugly=True, includeMetadata=False, python=False):
@@ -584,13 +601,32 @@ def multiscan(Files, recursive=False, configregen=False, configfile=CONFIG, conf
     if config_object:
         _write_missing_module_configs(module_list, config_object, filepath=configfile)
 
-    # Wait for all threads to finish
-    for thread in thread_list:
-        thread.join()
+    # Warn about spaces in file names
+    for f in filelist:
+        if ' ' in f:
+            print('WARNING: You are using file paths with spaces. This may result in modules not reporting correctly.')
+            break
 
-    if VERBOSE:
-        for thread in thread_list:
-            print(thread.name, "took", thread.endtime-thread.starttime)
+    # Wait for all threads to finish
+    thread_wait_list = thread_list[:]
+    i = 0
+    while thread_wait_list:
+        i += 1
+        for thread in thread_wait_list:
+            if not thread.is_alive():
+                i = 0
+                thread_wait_list.remove(thread)
+                if VERBOSE:
+                    print(thread.name, "took", thread.endtime-thread.starttime)
+        if i == 15:
+            i = 0
+            if VERBOSE:
+                p = 'Waiting on'
+                for thread in thread_wait_list:
+                    p += ' ' + thread.name
+                p += '...'
+                print(p)
+        time.sleep(1)
 
     # Delete copied files
     if main_config["copyfilesto"]:
@@ -705,8 +741,25 @@ def _subscan(subscan_list, config, main_config, module_list, global_module_inter
     thread_list = _start_module_threads(filelist, module_list, config, global_module_interface)
 
     # Wait for all threads to finish
-    for thread in thread_list:
-        thread.join()
+    thread_wait_list = thread_list[:]
+    i = 0
+    while thread_wait_list:
+        i += 1
+        for thread in thread_wait_list:
+            if not thread.is_alive():
+                i = 0
+                thread_wait_list.remove(thread)
+                if VERBOSE:
+                    print(thread.name, "took", thread.endtime-thread.starttime)
+        if i == 15:
+            i = 0
+            if VERBOSE:
+                p = 'Waiting on'
+                for thread in thread_wait_list:
+                    p += ' ' + thread.name
+                p += '...'
+                print(p)
+        time.sleep(1)
 
     # Delete copied files
     if main_config["copyfilesto"]:
@@ -784,7 +837,7 @@ def _init(args):
             print('Configuration file initialized at', args.config)
         else:
             print('Checking for missing modules in configuration...')
-            ModuleList = parseDir(MODULEDIR)
+            ModuleList = parseDir(MODULEDIR, recursive=True)
             Config = configparser.SafeConfigParser()
             Config.optionxform = str
             Config.read(args.config)
@@ -900,12 +953,13 @@ def _main():
             # TODO: Make this output something readable
             # Parse Results
             report = parse_reports(results, groups=config["group-types"], ugly=args.ugly, includeMetadata=args.metadata)
+
             # Print report
             try:
-                print(report, file=stdout)
+                print(convert_encoding(report, encoding='ascii', errors='replace'), file=stdout)
                 stdout.flush()
-            except IOError:
-                pass
+            except Exception as e:
+                print('ERROR: Can\'t print report -', e)
 
         report = parse_reports(results, groups=config["group-types"], includeMetadata=args.metadata, python=True)
 
@@ -915,6 +969,8 @@ def _main():
             if args.json.endswith('.gz') or args.json.endswith('.gzip'):
                 update_conf['File']['gzip'] = True
 
+        if 'storage-config' not in config:
+            config["storage-config"] = None
         storage_handle = storage.StorageHandler(configfile=config["storage-config"], config=update_conf)
         storage_handle.store(report)
         storage_handle.close()
