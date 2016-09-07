@@ -805,6 +805,7 @@ def _subscan(subscan_list, config, main_config, module_list, global_module_inter
 
     return results
 
+
 def _parse_args():
     """
     Parses arguments
@@ -845,6 +846,25 @@ def _init(args):
     else:
         config_init(args.config)
         print('Configuration file initialized at', args.config)
+
+    # Init storage
+    Config = configparser.SafeConfigParser()
+    Config.optionxform = str
+    Config.read(args.config)
+    config = _get_main_config(Config)
+    if os.path.isfile(config["storage-config"]):
+        print('Warning:', config["storage-config"], 'already exists, overwriting will destroy changes')
+        answer = raw_input('Do you wish to overwrite the configuration file [y/N]:')
+        if answer == 'y':
+            storage.config_init(config["storage-config"], overwrite=True)
+            print('Storage configuration file initialized at', config["storage-config"])
+        else:
+            print('Checking for missing modules in storage configuration...')
+            storage.config_init(config["storage-config"], overwrite=False)
+    else:
+        storage.config_init(config["storage-config"])
+        print('Storage configuration file initialized at', config["storage-config"])
+
     exit(0)
 
 
@@ -867,6 +887,12 @@ def _main():
 
     if not os.path.isfile(args.config):
         config_init(args.config)
+
+    # Make sure report is not a dir
+    if args.json:
+        if os.path.isdir(args.json):
+            print('ERROR:', args.json, 'is a directory, a file is expected')
+            return False
 
     # Parse the file list
     parsedlist = parseFileList(args.Files, recursive=args.recursive)
